@@ -6,19 +6,19 @@ from sklearn.utils import check_array
 from sklearn.utils.validation import check_is_fitted
 from sklearn.neighbors import KDTree
 
-from .numba_kdtree import kdtree_to_numba
-from .boruvka import parallel_boruvka
-from .cluster_trees import (
+from evoc.numba_kdtree import kdtree_to_numba
+from evoc.boruvka import parallel_boruvka
+from evoc.cluster_trees import (
     mst_to_linkage_tree,
     condense_tree,
     extract_leaves,
     get_cluster_label_vector,
     get_point_membership_strength_vector,
 )
-from .knn_graph import knn_graph
-from .label_propagation import label_propagation_init
-from .node_embedding import node_embedding
-from .graph_construction import neighbor_graph_matrix
+from evoc.knn_graph import knn_graph
+from evoc.label_propagation import label_propagation_init
+from evoc.node_embedding import node_embedding
+from evoc.graph_construction import neighbor_graph_matrix
 
 
 def build_cluster_layers(
@@ -28,6 +28,7 @@ def build_cluster_layers(
     min_samples=5,
     base_min_cluster_size=10,
     next_cluster_size_quantile=0.8,
+    cluster_selection_epsilon=0.0,
 ):
     n_samples = data.shape[0]
     cluster_layers = []
@@ -44,7 +45,7 @@ def build_cluster_layers(
     uncondensed_tree = mst_to_linkage_tree(sorted_mst)
     new_tree = condense_tree(uncondensed_tree, base_min_cluster_size)
     leaves = extract_leaves(new_tree)
-    clusters = get_cluster_label_vector(new_tree, leaves, 0.0, n_samples)
+    clusters = get_cluster_label_vector(new_tree, leaves, cluster_selection_epsilon, n_samples) # problem 
     strengths = get_point_membership_strength_vector(new_tree, leaves, clusters)
     n_clusters_in_layer = clusters.max() + 1
 
@@ -61,7 +62,7 @@ def build_cluster_layers(
             min_cluster_size = next_min_cluster_size
         new_tree = condense_tree(uncondensed_tree, min_cluster_size)
         leaves = extract_leaves(new_tree)
-        clusters = get_cluster_label_vector(new_tree, leaves, 0.0, n_samples)
+        clusters = get_cluster_label_vector(new_tree, leaves, cluster_selection_epsilon, n_samples)
         strengths = get_point_membership_strength_vector(new_tree, leaves, clusters)
         n_clusters_in_layer = clusters.max() + 1
 
@@ -127,7 +128,7 @@ def build_cluster_tree(labels):
 
 
 @numba.njit(cache=True)
-def _binary_search_for_n_clusters(uncondensed_tree, approx_n_clusters, n_samples):
+def _binary_search_for_n_clusters(uncondensed_tree, approx_n_clusters, n_samples, cluster_selection_epsilon):
     lower_bound_min_cluster_size = 2
     upper_bound_min_cluster_size = n_samples // 2
     mid_min_cluster_size = int(
@@ -168,7 +169,7 @@ def _binary_search_for_n_clusters(uncondensed_tree, approx_n_clusters, n_samples
     ):
         lower_tree = condense_tree(uncondensed_tree, lower_bound_min_cluster_size)
         leaves = extract_leaves(lower_tree)
-        clusters = get_cluster_label_vector(lower_tree, leaves, 0.0, n_samples)
+        clusters = get_cluster_label_vector(lower_tree, leaves, cluster_selection_epsilon, n_samples)
         strengths = get_point_membership_strength_vector(lower_tree, leaves, clusters)
         return clusters, strengths
     elif abs(lower_n_clusters - approx_n_clusters) > abs(
@@ -176,16 +177,16 @@ def _binary_search_for_n_clusters(uncondensed_tree, approx_n_clusters, n_samples
     ):
         upper_tree = condense_tree(uncondensed_tree, upper_bound_min_cluster_size)
         leaves = extract_leaves(upper_tree)
-        clusters = get_cluster_label_vector(upper_tree, leaves, 0.0, n_samples)
+        clusters = get_cluster_label_vector(upper_tree, leaves, cluster_selection_epsilon, n_samples)
         strengths = get_point_membership_strength_vector(upper_tree, leaves, clusters)
         return clusters, strengths
     else:
         lower_tree = condense_tree(uncondensed_tree, lower_bound_min_cluster_size)
         lower_leaves = extract_leaves(lower_tree)
-        lower_clusters = get_cluster_label_vector(lower_tree, lower_leaves)
+        lower_clusters =  get_cluster_label_vector(lower_tree, lower_leaves, cluster_selection_epsilon, n_samples)
         upper_tree = condense_tree(uncondensed_tree, upper_bound_min_cluster_size)
         upper_leaves = extract_leaves(upper_tree)
-        upper_clusters = get_cluster_label_vector(upper_tree, upper_leaves, 0.0, n_samples)
+        upper_clusters = get_cluster_label_vector(upper_tree, upper_leaves, cluster_selection_epsilon, n_samples)
 
         if np.sum(lower_clusters >= 0) > np.sum(upper_clusters >= 0):
             strengths = get_point_membership_strength_vector(
@@ -202,6 +203,7 @@ def _binary_search_for_n_clusters(uncondensed_tree, approx_n_clusters, n_samples
 def binary_search_for_n_clusters(
     data,
     approx_n_clusters,
+    cluster_selection_epsilon,
     *,
     min_samples=5,
 ):
@@ -213,7 +215,7 @@ def binary_search_for_n_clusters(
 
     n_samples = data.shape[0]
 
-    return _binary_search_for_n_clusters(uncondensed_tree, approx_n_clusters, n_samples)
+    return _binary_search_for_n_clusters(uncondensed_tree, approx_n_clusters, n_samples, cluster_selection_epsilon)
 
 
 def evoc_clusters(
@@ -231,6 +233,7 @@ def evoc_clusters(
     return_duplicates=False,
     node_embedding_dim=None,
     neighbor_scale=1.0,
+    cluster_selection_epsilon=0.1  
 ):
     """Cluster data using the EVoC algorithm.
 
@@ -352,8 +355,8 @@ def evoc_clusters(
         cluster_vector, strengths = binary_search_for_n_clusters(
             embedding,
             approx_n_clusters,
-            min_samples=min_samples,
-        )
+            cluster_selection_epsilon=cluster_selection_epsilon,
+            min_samples=min_samples,)
         if return_duplicates:
             return [cluster_vector], [strengths], duplicates
         else:
@@ -365,6 +368,7 @@ def evoc_clusters(
             min_samples=min_samples,
             base_min_cluster_size=base_min_cluster_size,
             next_cluster_size_quantile=next_cluster_size_quantile,
+            cluster_selection_epsilon=cluster_selection_epsilon
         )
         if return_duplicates:
             return cluster_layers, membership_strengths, duplicates
@@ -484,6 +488,7 @@ class EVoC(BaseEstimator, ClusterMixin):
         symmetrize_graph=True,
         node_embedding_dim=None,
         neighbor_scale=1.0,
+        cluster_selection_epsilon=0.0
     ):
         self.n_neighbors = n_neighbors
         self.noise_level = noise_level
@@ -497,7 +502,7 @@ class EVoC(BaseEstimator, ClusterMixin):
         self.symmetrize_graph = symmetrize_graph
         self.node_embedding_dim = node_embedding_dim
         self.neighbor_scale = neighbor_scale
-
+        self.cluster_selection_epsilon=cluster_selection_epsilon
     def fit_predict(self, X, y=None, **fit_params):
         """Fit the model to the data and return the clustering labels.
 
@@ -543,6 +548,7 @@ class EVoC(BaseEstimator, ClusterMixin):
                 return_duplicates=True,
                 node_embedding_dim=self.node_embedding_dim,
                 neighbor_scale=self.neighbor_scale,
+                
             )
         )
 
